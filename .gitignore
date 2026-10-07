@@ -1,0 +1,9 @@
+bin/
+obj/
+*.csproj
+*.sln
+test/
+.vs/
+__pycache__/
+*.pyc
+OnlineRepo.json.tmp
