@@ -15,7 +15,7 @@ namespace VanivilleKalosScript;
     guid: "6A92C840-F7F6-4269-9CCA-F55E00E644C9",
     name: "(光暗未来绝境战)P5 绝伊甸地火猫爪法指路 FRU Cat Paw Guidance",
     territorys: [1238],
-    version: "0.0.0.5",
+    version: "0.0.0.6",
     note: Notes,
     author: "Aizen232503 卡璞·仙仙"
 )]
@@ -36,7 +36,8 @@ public class FuturesRewrittenUltimateCatPaw
     public ScriptColor PointCircleColour { get; set; } = new() { V4 = new(0f, 0.8f, 1f, 0.6f) };
     [UserSetting("始终显示猫爪法的三个点位圈")]
     public bool ShowPointCircles { get; set; } = true;
-
+    [UserSetting("提示穿入方向\n以面向猫爪法的三角形中心为准，方向与地火先亮起的方向一致。建议仅在开启“始终显示猫爪法的三个点位圈”时启用。")]
+    public bool ShowEntryDirection { get; set; } = false;
     [UserSetting("显示起点与方向横幅")]
     public bool EnableStartBanner { get; set; } = true;
     [UserSetting("显示换点横幅")]
@@ -142,7 +143,7 @@ public class FuturesRewrittenUltimateCatPaw
             Vector2[] route = [pointA, pointB, pointC, pointA];
             if (EnableStartBanner || EnableMoveBanner)
             {
-                string[] sides = ["北", "东", "南", "西"];
+                string[] sides = ["上北", "右东", "下南", "左西"];
                 _ = ShowDirectionBanners(accessory, sides[centreIndex], isInverse, fireRound);
             }
 
@@ -193,9 +194,11 @@ public class FuturesRewrittenUltimateCatPaw
 
     private async Task ShowDirectionBanners(ScriptAccessory accessory, string side, bool isInverse, int round)
     {
-        string direction = isInverse ? "逆时针" : "顺时针";
+        string entry = ShowEntryDirection
+            ? (isInverse ? "向右逆时针穿入" : "向左顺时针穿入")
+            : "按箭头穿入";
         if (EnableStartBanner)
-            accessory.Method.TextInfo($"场地{side}侧开始，稍后{direction}穿入", 5000);
+            accessory.Method.TextInfo($"场地{side}侧开始，稍后{entry}", 5000);
         if (!EnableMoveBanner) return;
 
         // 三次换点与指路同步：首次等待 9 秒，后续每隔 4 秒。
@@ -204,7 +207,7 @@ public class FuturesRewrittenUltimateCatPaw
             await Task.Delay(step == 1 ? 9000 : 4000);
             if (round != fireRound) return;
             if (EnableMoveBanner)
-                accessory.Method.TextInfo($"{direction}穿入", 2000);
+                accessory.Method.TextInfo(ShowEntryDirection ? entry : "穿入下一点", 2000);
         }
     }
 

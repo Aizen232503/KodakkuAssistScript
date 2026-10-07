@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul
 pushd "%~dp0"
 if errorlevel 1 exit /b 1
 
@@ -17,7 +18,11 @@ if not defined pythonCommand (
     if /i not "%~1"=="--no-pause" pause
     exit /b 1
 )
-%pythonCommand% "%~dp0utils\parser.py" "%CD%"
+if /i "%~1"=="--no-pause" (
+    %pythonCommand% -X utf8 "%~dp0utils\parser.py" "%CD%"
+) else (
+    %pythonCommand% -X utf8 "%~dp0utils\parser.py" "%CD%" --interactive
+)
 set "result=%errorlevel%"
 if not "%result%"=="0" (
     echo Update failed. The existing OnlineRepo.json was preserved.

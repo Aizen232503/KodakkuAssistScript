@@ -1,10 +1,13 @@
 """Generate OnlineRepo.json from local C# scripts, without executing them."""
 
+import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from urllib.parse import quote
 from uuid import UUID
 
@@ -158,44 +161,174 @@ def script_files(root):
                 yield Path(directory, name)
 
 
-def generate(root):
+def version_numbers(version):
+    if not re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+        raise ValueError(f"Unsupported version: {version}. Use 2–4 numeric components.")
+    return tuple(int(part) for part in version.split("."))
+
+
+def next_version(version):
+    numbers = list(version_numbers(version))
+    numbers[-1] += 1
+    if numbers[-1] > 2147483647:
+        raise ValueError(f"Version component is too large: {version}.")
+    return ".".join(map(str, numbers))
+
+
+def replace_version(source, file, version):
+    tokens = [token for token in TOKEN.finditer(source)
+              if token.lastgroup not in {"space", "comment"}]
+    for index, token in enumerate(tokens[:-1]):
+        if token.lastgroup != "identifier" or token.group() not in {"ScriptType", "ScriptTypeAttribute"}:
+            continue
+        if tokens[index + 1].group() != "(":
+            continue
+        depth = 0
+        for position in range(index + 2, len(tokens) - 2):
+            current = tokens[position]
+            if depth == 0 and current.group() == ")":
+                break
+            if depth == 0 and current.group() == "version" and tokens[position + 1].group() == ":":
+                value = tokens[position + 2]
+                if value.lastgroup == "identifier":
+                    # A literal string constant can also hold the version.
+                    name = value.group()
+                    value = next((tokens[i + 4] for i in range(len(tokens) - 5)
+                                  if [item.group() for item in tokens[i:i + 4]] == ["const", "string", name, "="]
+                                  and tokens[i + 5].group() == ";"), None)
+                elif tokens[position + 3].group() not in {",", ")"}:
+                    value = None
+                if value is None or value.lastgroup != "string":
+                    raise ValueError(f"{file}: automatic version updates require a string literal or a literal string constant.")
+                return source[:value.start()] + json.dumps(version) + source[value.end():]
+            if current.lastgroup == "punctuation":
+                if current.group() in "([{":
+                    depth += 1
+                elif current.group() in ")]}":
+                    depth -= 1
+    raise ValueError(f"{file}: version parameter was not found.")
+
+
+def write_updates(updates):
+    """Stage every file before replacing any; restore originals on write failure."""
+    originals, staged, replaced = {}, {}, []
+    try:
+        for file, content in updates.items():
+            originals[file] = file.read_bytes() if file.exists() else None
+            with tempfile.NamedTemporaryFile(dir=file.parent, prefix=".update-", suffix=".tmp", delete=False) as temporary:
+                staged[file] = Path(temporary.name)
+                temporary.write(content)
+        for file, temporary in staged.items():
+            temporary.replace(file)
+            replaced.append(file)
+    except OSError:
+        for file in reversed(replaced):
+            if originals[file] is None:
+                file.unlink()
+            else:
+                file.write_bytes(originals[file])
+        raise
+    finally:
+        for temporary in staged.values():
+            temporary.unlink(missing_ok=True)
+
+
+def generate(root, interactive=False):
     config = json.loads((root / "utils" / "config.json").read_text(encoding="utf-8-sig"))
     repository, branch = config["Repository"], config["Branch"]
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository) or not branch.strip():
         raise ValueError("Set Repository to owner/name and specify Branch.")
-    infos, guids = [], set()
+    state_file = root / "utils" / "update-state.json"
+    previous = json.loads(state_file.read_text(encoding="utf-8"))["Scripts"] if state_file.exists() else {}
+    scripts, guids, proposals = [], set(), []
     for file in script_files(root):
         relative = file.relative_to(root).as_posix()
-        source = file.read_text(encoding="utf-8-sig")
+        raw = file.read_bytes()
+        source = raw.decode("utf-8-sig")
         if not is_public(source, relative):
             print(f"Excluded: {relative}")
             continue
         info = parse_script(source, relative)
         if info is None:
             continue
-        guid = UUID(info["Guid"])
+        guid = str(UUID(info["Guid"]))
         if guid in guids:
             raise ValueError(f"{relative}: duplicate script GUID {guid}.")
         guids.add(guid)
         info["DownloadUrl"] = f"https://raw.githubusercontent.com/{repository}/{quote(branch, safe='')}/{quote(relative, safe='/')}"
-        infos.append(info)
+        fingerprint = hashlib.sha256(source.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        script = {"file": file, "path": relative, "source": source, "raw": raw, "info": info, "guid": guid, "hash": fingerprint}
+        scripts.append(script)
+        old = previous.get(guid)
+        if interactive and old and (old["Hash"] != fingerprint or old["Path"] != relative):
+            current_numbers = version_numbers(info["Version"])
+            old_numbers = version_numbers(old["Version"])
+            current_order = current_numbers + (0,) * (4 - len(current_numbers))
+            old_order = old_numbers + (0,) * (4 - len(old_numbers))
+            if current_order < old_order:
+                raise ValueError(f"{relative}: version {info['Version']} is lower than the last recorded version {old['Version']}.")
+            if current_order > old_order:
+                print(f"已手动更新版本：{relative}（{old['Version']} -> {info['Version']}）")
+            else:
+                updated = next_version(info["Version"])
+                # Check that every proposed version can be written before prompting.
+                script["updated_source"] = replace_version(source, relative, updated)
+                script["updated_version"] = updated
+                proposals.append(script)
         print(f"Included: {relative}")
 
-    # Replace the index only after all included scripts parsed successfully.
-    output = root / "OnlineRepo.json"
-    temporary = output.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(infos, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(output)
+    if not state_file.exists():
+        print("首次运行：建立当前内容记录，本次不自动递增版本。")
+    elif interactive and not proposals:
+        print("没有需要自动递增版本的脚本。")
+
+    bump = False
+    if proposals:
+        print("\n以下公开脚本有改动：")
+        for script in proposals:
+            print(f"  {script['path']}\n    {script['info']['Version']} -> {script['updated_version']}")
+        while True:
+            answer = input("按回车递增上述版本并更新索引；输入 0 只更新索引：").strip()
+            if answer in {"", "0"}:
+                bump = answer == ""
+                break
+            print("请输入 0 或直接按回车。")
+
+    updates, infos, records = {}, [], {}
+    for script in scripts:
+        info = script["info"]
+        if bump and "updated_source" in script:
+            source = script["updated_source"]
+            # Reparse the rewritten source so source and index cannot diverge.
+            revised = parse_script(source, script["path"])
+            if revised["Version"] != script["updated_version"]:
+                raise ValueError(f"{script['path']}: failed to rewrite version.")
+            info["Version"] = revised["Version"]
+            bom = b"\xef\xbb\xbf" if script["raw"].startswith(b"\xef\xbb\xbf") else b""
+            updates[script["file"]] = bom + source.encode("utf-8")
+            script["hash"] = hashlib.sha256(source.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        infos.append(info)
+        records[script["guid"]] = {"Hash": script["hash"], "Version": info["Version"], "Path": script["path"]}
+    updates[root / "OnlineRepo.json"] = (json.dumps(infos, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    updates[state_file] = (json.dumps({"Scripts": records}, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    write_updates(updates)
     print(f"Generated OnlineRepo.json with {len(infos)} entries.")
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--interactive", action="store_true", help="Offer version updates for changed public scripts.")
+    args = parser.parse_args()
     try:
-        generate(find_root(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent))
+        generate(find_root(args.root), interactive=args.interactive)
         return 0
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError, KeyError, EOFError) as error:
         print(f"OnlineRepo generation failed: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\n已取消更新。", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
