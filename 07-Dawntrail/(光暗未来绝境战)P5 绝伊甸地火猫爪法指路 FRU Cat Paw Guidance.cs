@@ -15,7 +15,7 @@ namespace VanivilleKalosScript;
     guid: "6A92C840-F7F6-4269-9CCA-F55E00E644C9",
     name: "(光暗未来绝境战)P5 绝伊甸地火猫爪法指路 FRU Cat Paw Guidance",
     territorys: [1238],
-    version: "0.0.0.8",
+    version: "0.0.0.9",
     note: Notes,
     author: "Aizen232503 卡璞·仙仙"
 )]
@@ -24,7 +24,7 @@ public class FuturesRewrittenUltimateCatPaw
     private const string Notes =
         "提供 P5 光尘之剑（地火）的猫爪法指路，与 MMW 攻略一致。移动次数较少，对部分职业较为友好。同时，地火指路时机可比特效出现提前至多 7 秒以供提前就位。\n" +
         "原理说明：猫爪法的整体路线为三角形，沿顺时针或逆时针依次穿三次，最后回到起点。\n" +
-        "绘制说明：默认显示三个点位圈的范围，以及当前点位和下一点位的指路。当前点位的箭头和点位圈默认绿色；下一点位的箭头和点位圈默认黄色。指路默认在“光尘之剑”读条开始 8 秒后（地火特效出现时）显示，可在用户配置中调整。起点横幅提示固定在读条开始 10 秒后（首组地火亮起时）显示。横幅提示中的穿入方向，指的是面向当前轮次地火（或猫爪三角形的中心）时穿猫爪的左／右，与 MMW 攻略一致，并非面向 Boss 的左右。\n" +
+        "绘制说明：默认显示三个点位圈的范围，以及当前点位和下一点位的指路。当前点位的箭头和点位圈默认绿色；下一点位的箭头和点位圈默认黄色。指路默认在“光尘之剑”读条开始 8 秒后（地火特效出现时）显示，可在用户配置中调整。横幅提示中的穿入方向，指的是面向当前轮次地火（或猫爪三角形的中心）时穿猫爪的左／右，与 MMW 攻略一致，并非面向 Boss 的左右。\n" +
         "温馨提示：使用其他绝伊甸脚本时，请关闭其中重复的 P5 地火指路。例如，灵视脚本中的“Phase5 Guidance Of Fulgent Blade 璀璨之刃(地火)指路”功能。\n" +
         "特别鸣谢：洛可利亚奏鸣曲、Cicero 灵视";
 
@@ -202,13 +202,13 @@ public class FuturesRewrittenUltimateCatPaw
         lock (drawLock)
         {
             if (!BeginFireRound(@event, accessory, nameof(CatPawStartBanner))) return;
-            _ = ShowStartBanner(accessory, fireRound, castStartedAt, routeReady.Task);
+            _ = ShowStartBanner(accessory, fireRound, castStartedAt, routeReady.Task, (int)(GuidanceDelaySeconds * 1000));
         }
     }
 
-    private async Task ShowStartBanner(ScriptAccessory accessory, int round, long startedAt, Task<CatPawRoute> ready)
+    private async Task ShowStartBanner(ScriptAccessory accessory, int round, long startedAt, Task<CatPawRoute> ready, int showAt)
     {
-        var data = await WaitForRoute(ready, startedAt, 10000);
+        var data = await WaitForRoute(ready, startedAt, showAt);
         if (data is null) return;
         lock (drawLock)
         {
