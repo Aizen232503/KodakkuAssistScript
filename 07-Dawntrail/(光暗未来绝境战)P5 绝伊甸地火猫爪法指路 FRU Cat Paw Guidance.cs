@@ -15,7 +15,7 @@ namespace VanivilleKalosScript;
     guid: "6A92C840-F7F6-4269-9CCA-F55E00E644C9",
     name: "(光暗未来绝境战)P5 绝伊甸地火猫爪法指路 FRU Cat Paw Guidance",
     territorys: [1238],
-    version: "0.0.0.6",
+    version: "0.0.0.7",
     note: Notes,
     author: "Aizen232503 卡璞·仙仙"
 )]
@@ -24,8 +24,9 @@ public class FuturesRewrittenUltimateCatPaw
     private const string Notes =
         "提供 P5 光尘之剑（地火）的猫爪法指路，与 MMW 攻略一致。移动次数较少，对部分职业较为友好。\n" +
         "原理说明：猫爪法的整体路线为三角形，沿顺时针或逆时针依次穿三次，最后回到起点。\n" +
-        "绘制说明：默认显示三个点位圈的范围，以及当前点位和下一点位的指路。当前点位的箭头和点位圈默认绿色；下一点位的箭头和点位圈默认黄色。\n" +
-        "温馨提示：使用其他绝伊甸脚本时，请关闭其中重复的 P5 地火指路。例如，灵视脚本中的“Phase5 Guidance Of Fulgent Blade 璀璨之刃(地火)指路”功能。";
+        "绘制说明：默认显示三个点位圈的范围，以及当前点位和下一点位的指路。当前点位的箭头和点位圈默认绿色；下一点位的箭头和点位圈默认黄色。横幅提示中的穿入方向，指的是面向当前轮次地火（或猫爪三角形的中心）时穿猫爪的左／右，与 MMW 攻略一致，并非面向 Boss 的左右。\n" +
+        "温馨提示：使用其他绝伊甸脚本时，请关闭其中重复的 P5 地火指路。例如，灵视脚本中的“Phase5 Guidance Of Fulgent Blade 璀璨之刃(地火)指路”功能。\n" +
+        "特别鸣谢：洛可利亚奏鸣曲、Cicero 灵视";
 
     [UserSetting("当前点指路颜色")]
     public ScriptColor CurrentStepColour { get; set; } = new() { V4 = new(0f, 1f, 0f, 1f) };
@@ -36,20 +37,19 @@ public class FuturesRewrittenUltimateCatPaw
     public ScriptColor PointCircleColour { get; set; } = new() { V4 = new(0f, 0.8f, 1f, 0.6f) };
     [UserSetting("始终显示猫爪法的三个点位圈")]
     public bool ShowPointCircles { get; set; } = true;
-    [UserSetting("提示穿入方向\n以面向猫爪法的三角形中心为准，方向与地火先亮起的方向一致。建议仅在开启“始终显示猫爪法的三个点位圈”时启用。")]
-    public bool ShowEntryDirection { get; set; } = false;
-    [UserSetting("显示起点与方向横幅")]
-    public bool EnableStartBanner { get; set; } = true;
-    [UserSetting("显示换点横幅")]
-    public bool EnableMoveBanner { get; set; } = true;
+    [UserSetting("提示穿入方向\n即 MMW 攻略里穿猫爪的左／右，以面向当前轮次地火（或猫爪三角形的中心）时的左右为准，并非面向 Boss 的左右。\n建议仅在开启“始终显示猫爪法的三个点位圈”时启用。")]
+    public bool ShowEntryDirection { get; set; } = true;
 
     private int fireRound;
     private string phase = "";
     private readonly List<Blade> blades = [];
-    private readonly object bladeLock = new();
     private readonly object drawLock = new();
     private Blade[] firstAndLastBlades = [];
     private Vector2 point1, point2, point3, middlePoint;
+    private CatPawRoute? catPawRoute;
+    private readonly HashSet<string> handledMethods = [];
+
+    private record CatPawRoute(uint GlowId, Vector2[] Points, string Side, bool IsInverse);
 
     private record Blade(uint Id, double X, double Y, double Rotation);
 
@@ -60,29 +60,37 @@ public class FuturesRewrittenUltimateCatPaw
         phase = "";
         blades.Clear();
         firstAndLastBlades = [];
+        catPawRoute = null;
+        handledMethods.Clear();
     }
 
     public void Init(ScriptAccessory accessory)
     {
-        ResetStates();
-        accessory.Method.RemoveDraw("^FRUPatch_CatPaw_");
+        lock (drawLock)
+        {
+            ResetStates();
+            accessory.Method.RemoveDraw("^FRUPatch_CatPaw_");
+        }
     }
 
     [ScriptMethod(name: "P5地火开始", eventType: EventTypeEnum.StartCasting,
         eventCondition: ["ActionId:40306"], userControl: false)]
     public void FulgentBladeStart(Event @event, ScriptAccessory accessory)
     {
-        ResetStates();
-        phase = "P5地火";
+        lock (drawLock)
+        {
+            ResetStates();
+            phase = "P5地火";
+        }
     }
 
     [ScriptMethod(name: "P5地火数据捕获", eventType: EventTypeEnum.ObjectEffect,
         eventCondition: ["Id1:1"], userControl: false)]
     public void CaptureBlades(Event @event, ScriptAccessory accessory)
     {
-        if (phase != "P5地火") return;
-        lock (bladeLock)
+        lock (drawLock)
         {
+            if (phase != "P5地火") return;
             var position = JsonConvert.DeserializeObject<Vector3>(@event["SourcePosition"]);
             blades.Add(new Blade(Convert.ToUInt32(@event["SourceId"], 16),
                 position.X, position.Z, Convert.ToDouble(@event["SourceRotation"])));
@@ -108,44 +116,9 @@ public class FuturesRewrittenUltimateCatPaw
     {
         lock (drawLock)
         {
-            if (phase != "P5地火计算完成") return;
-            phase = "P5运算结束";
-            var id = Convert.ToUInt32(@event["SourceId"], 16);
-
-            // 根据交点中点的位置，确定本轮在场地哪一侧处理地火。
-            Vector2[] centres = [new(100.00f, 92.93f), new(107.07f, 100.00f),
-                new(100.00f, 107.07f), new(92.93f, 100.00f)];
-            int centreIndex = Enumerable.Range(0, centres.Length)
-                .OrderBy(index => Vector2.DistanceSquared(centres[index], middlePoint)).First();
-            Vector2 centre = centres[centreIndex];
-
-            // 发光实体决定首组交点，计算首组和第二组相对处理中心的八方向编号。
-            Vector2 firstOffset = (id == firstAndLastBlades[0].Id || id == firstAndLastBlades[1].Id ? point1 : point3) - middlePoint;
-            Vector2 secondOffset = point2 - middlePoint;
-            int firstDirection = ((int)Math.Round((Math.Atan2(firstOffset.X, firstOffset.Y) / Math.PI + 1) * 4 - 0.5) + 8) % 8;
-            int secondDirection = ((int)Math.Round((Math.Atan2(secondOffset.X, secondOffset.Y) / Math.PI + 1) * 4 - 0.5) + 8) % 8;
-            // 第二组方向编号比首组增加 2 时为逆时针，否则为顺时针。
-            bool isInverse = (secondDirection - firstDirection + 8) % 8 == 2;
-            Vector2[] startOffsets =
-            [
-                new(0.52f, 1.25f), new(1.25f, 0.52f), new(1.25f, -0.52f), new(0.52f, -1.25f),
-                new(-0.52f, -1.25f), new(-1.25f, -0.52f), new(-1.25f, 0.52f), new(-0.52f, 1.25f)
-            ];
-            Vector2[] nextOffsets =
-            [
-                new(-1.25f, -3.02f), new(-3.02f, -1.25f), new(-3.02f, 1.25f), new(-1.25f, 3.02f),
-                new(1.25f, 3.02f), new(3.02f, 1.25f), new(3.02f, -1.25f), new(1.25f, -3.02f)
-            ];
-            // A 位于首组交点的对侧；B、C 取相邻两侧，按顺逆时针决定先后。
-            Vector2 pointA = centre + startOffsets[firstDirection];
-            Vector2 pointB = centre + nextOffsets[(firstDirection + (isInverse ? 7 : 1)) % 8];
-            Vector2 pointC = centre + nextOffsets[(firstDirection + (isInverse ? 1 : 7)) % 8];
-            Vector2[] route = [pointA, pointB, pointC, pointA];
-            if (EnableStartBanner || EnableMoveBanner)
-            {
-                string[] sides = ["上北", "右东", "下南", "左西"];
-                _ = ShowDirectionBanners(accessory, sides[centreIndex], isInverse, fireRound);
-            }
+            var data = PrepareCatPawRoute(@event, nameof(CatPawGuidance));
+            if (data is null) return;
+            var route = data.Points;
 
             // 从首个发光事件计时：9 秒去 B，再每隔 4 秒去 C、回 A，最后显示 2 秒。
             int[] delays = [0, 9000, 13000, 17000];
@@ -192,22 +165,93 @@ public class FuturesRewrittenUltimateCatPaw
         }
     }
 
-    private async Task ShowDirectionBanners(ScriptAccessory accessory, string side, bool isInverse, int round)
+    [ScriptMethod(name: "光尘之剑（地火）起点横幅提示", eventType: EventTypeEnum.ObjectEffect,
+        eventCondition: ["Id2:16"])]
+    public void CatPawStartBanner(Event @event, ScriptAccessory accessory)
     {
-        string entry = ShowEntryDirection
-            ? (isInverse ? "向右逆时针穿入" : "向左顺时针穿入")
-            : "按箭头穿入";
-        if (EnableStartBanner)
-            accessory.Method.TextInfo($"场地{side}侧开始，稍后{entry}", 5000);
-        if (!EnableMoveBanner) return;
+        lock (drawLock)
+        {
+            var data = PrepareCatPawRoute(@event, nameof(CatPawStartBanner));
+            if (data is null) return;
+            string entry = ShowEntryDirection ? EntryDirection(data.IsInverse) : "按箭头穿入";
+            accessory.Method.TextInfo($"场地{data.Side}侧开始，稍后{entry}", 5000);
+        }
+    }
 
+    [ScriptMethod(name: "光尘之剑（地火）后续点横幅提示", eventType: EventTypeEnum.ObjectEffect,
+        eventCondition: ["Id2:16"])]
+    public void CatPawMoveBanner(Event @event, ScriptAccessory accessory)
+    {
+        lock (drawLock)
+        {
+            var data = PrepareCatPawRoute(@event, nameof(CatPawMoveBanner));
+            if (data is null) return;
+            _ = ShowMoveBanners(accessory, data.IsInverse, fireRound);
+        }
+    }
+
+    // 首个有效发光事件确定共用路线，指路和两种横幅分别只执行一次。
+    private CatPawRoute? PrepareCatPawRoute(Event @event, string method)
+    {
+        if (phase != "P5地火计算完成" && phase != "P5运算结束") return null;
+        var id = Convert.ToUInt32(@event["SourceId"], 16);
+        if (phase == "P5地火计算完成")
+        {
+            if (!firstAndLastBlades.Any(blade => blade.Id == id)) return null;
+            catPawRoute = CalculateCatPawRoute(id);
+            phase = "P5运算结束";
+        }
+        if (catPawRoute is null || id != catPawRoute.GlowId || !handledMethods.Add(method)) return null;
+        return catPawRoute;
+    }
+
+    private CatPawRoute CalculateCatPawRoute(uint id)
+    {
+        // 根据交点中点的位置，确定本轮在场地哪一侧处理地火。
+        Vector2[] centres = [new(100.000f, 92.929f), new(107.071f, 100.000f),
+            new(100.000f, 107.071f), new(92.929f, 100.000f)];
+        int centreIndex = Enumerable.Range(0, centres.Length)
+            .OrderBy(index => Vector2.DistanceSquared(centres[index], middlePoint)).First();
+        Vector2 centre = centres[centreIndex];
+
+        // 发光实体决定首组交点，计算首组和第二组相对处理中心的八方向编号。
+        Vector2 firstOffset = (id == firstAndLastBlades[0].Id || id == firstAndLastBlades[1].Id ? point1 : point3) - middlePoint;
+        Vector2 secondOffset = point2 - middlePoint;
+        int firstDirection = ((int)Math.Round((Math.Atan2(firstOffset.X, firstOffset.Y) / Math.PI + 1) * 4 - 0.5) + 8) % 8;
+        int secondDirection = ((int)Math.Round((Math.Atan2(secondOffset.X, secondOffset.Y) / Math.PI + 1) * 4 - 0.5) + 8) % 8;
+        // 第二组方向编号比首组增加 2 时为逆时针，否则为顺时针。
+        bool isInverse = (secondDirection - firstDirection + 8) % 8 == 2;
+        Vector2[] startOffsets =
+        [
+            new(0.518f, 1.250f), new(1.250f, 0.518f), new(1.250f, -0.518f), new(0.518f, -1.250f),
+            new(-0.518f, -1.250f), new(-1.250f, -0.518f), new(-1.250f, 0.518f), new(-0.518f, 1.250f)
+        ];
+        Vector2[] nextOffsets =
+        [
+            new(-1.250f, -3.018f), new(-3.018f, -1.250f), new(-3.018f, 1.250f), new(-1.250f, 3.018f),
+            new(1.250f, 3.018f), new(3.018f, 1.250f), new(3.018f, -1.250f), new(1.250f, -3.018f)
+        ];
+        // A 位于首组交点的对侧；B、C 取相邻两侧，按顺逆时针决定先后。
+        Vector2 pointA = centre + startOffsets[firstDirection];
+        Vector2 pointB = centre + nextOffsets[(firstDirection + (isInverse ? 7 : 1)) % 8];
+        Vector2 pointC = centre + nextOffsets[(firstDirection + (isInverse ? 1 : 7)) % 8];
+        string[] sides = ["上北", "右东", "下南", "左西"];
+        return new CatPawRoute(id, [pointA, pointB, pointC, pointA], sides[centreIndex], isInverse);
+    }
+
+    private static string EntryDirection(bool isInverse) => isInverse ? "向右逆时针穿入" : "向左顺时针穿入";
+
+    private async Task ShowMoveBanners(ScriptAccessory accessory, bool isInverse, int round)
+    {
         // 三次换点与指路同步：首次等待 9 秒，后续每隔 4 秒。
         for (int step = 1; step < 4; step++)
         {
             await Task.Delay(step == 1 ? 9000 : 4000);
-            if (round != fireRound) return;
-            if (EnableMoveBanner)
-                accessory.Method.TextInfo(ShowEntryDirection ? entry : "穿入下一点", 2000);
+            lock (drawLock)
+            {
+                if (round != fireRound) return;
+                accessory.Method.TextInfo(ShowEntryDirection ? EntryDirection(isInverse) : "穿入下一点", 2000);
+            }
         }
     }
 
